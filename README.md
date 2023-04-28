@@ -27,6 +27,7 @@ New.
 - redirect 404 to index.html
 - set index page like index.html
 - use host name as a bucket name
+- force the bucket name
 
 Redirect pattern:
 `try_files $uri $uri/index.html /index.html`
@@ -70,6 +71,8 @@ Usage of gcsproxy:
   -s string
      Use SA key from secretManager. E.G. 'projects/937121755211/secrets/gcs-proxy/versions/1'
   -v Show access log.
+  -force-bucket <bucket-name>
+     All requests will got to this bucket regardless of the URL.
 
 ```
 
