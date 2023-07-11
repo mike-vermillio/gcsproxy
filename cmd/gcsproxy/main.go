@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -31,6 +32,7 @@ var (
 	redirect404   = flag.Bool("r", false, "Redirect to index.html if 404 not found.")
 	indexPage     = flag.String("i", "", "Index page file name.")
 	useDomainName = flag.Bool("dn", false, "Use hostname as a bucket name.")
+	forceBucket   = flag.String("force-bucket", "", "Force bucket name.")
 	useSecret     = flag.String("s", "", "Use SA key from secretManager. E.G. 'projects/937192795301/secrets/gcs-proxy/versions/1'")
 	verbose       = flag.Bool("v", false, "Show access log.")
 
@@ -123,12 +125,17 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 		params["bucket"] = r.Host
 	}
 
+	// If we are forcing the bucket name, read from it, don't expect it in the URL
+	if *forceBucket != "" {
+		params["bucket"] = *forceBucket
+	}
+
 	// Set index page name
 	if *indexPage != "" && params["object"] == "" {
 		params["object"] = *indexPage
 	}
 
-	obj := client.Bucket(params["bucket"]).Object(params["object"])
+	obj := client.Bucket(params["bucket"]).Object(params["object"]).ReadCompressed(acceptsGzip(r))
 	attr, err := obj.Attrs(ctx)
 
 	if err == storage.ErrObjectNotExist && *redirect404 {
@@ -159,18 +166,23 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 	setStrHeader(w, "Content-Disposition", attr.ContentDisposition)
 	setStrHeader(w, "X-Goog-Authenticated-User-Id", r.Header.Get("X-Goog-Authenticated-User-Id"))
 	setStrHeader(w, "X-Goog-Authenticated-User-Email", r.Header.Get("X-Goog-Authenticated-User-Email"))
-	setIntHeader(w, "Content-Length", attr.Size)
 
 	objr, err := obj.NewReader(ctx)
 	if err != nil {
 		handleErrorRW(w, err)
 		return
 	}
-	_, err = io.Copy(w, objr)
+	var bytesWritten int64
+	bytesWritten, err = io.Copy(w, objr)
 	if err != nil {
 		handleErrorRW(w, err)
 		return
 	}
+	setIntHeader(w, "Content-Length", bytesWritten)
+}
+
+func acceptsGzip(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
 }
 
 func initTracer() *sdktrace.TracerProvider {
@@ -235,7 +247,7 @@ func main() {
 		log.Fatalf("Failed to create client: %v", err)
 	}
 
-	if !*useDomainName {
+	if !*useDomainName && *forceBucket == "" {
 		path = "/{bucket:[0-9a-zA-Z-_.]+}"
 	}
 
