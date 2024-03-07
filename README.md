@@ -29,6 +29,10 @@ New.
 - use host name as a bucket name
 - force the bucket name
 
+TO ADD:
+- directory listing
+- force prefix
+
 Redirect pattern:
 `try_files $uri $uri/index.html /index.html`
 
