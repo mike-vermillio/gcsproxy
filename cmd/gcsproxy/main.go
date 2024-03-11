@@ -60,10 +60,10 @@ var (
 	
 			<div class="overflow-x-auto">
 				<table class="min-w-full border bg-white">
-					<thead>
+					<thead class="bg-gray-50">
 						<tr>
-							<th class="py-2 px-4 border-b w-4/5">Name</th>
-							<th class="py-2 px-4 border-b w-1/5">Size</th>
+							<th class="text-left py-2 px-4 border-b w-4/5">Name</th>
+							<th class="text-left py-2 px-4 border-b w-1/5">Size</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -266,10 +266,12 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 	if path == "" && *listDirectory {
 		path = "/" // hacky but works for now...
 	}
+
+	fmt.Printf("Checking path %s\n", path)
 	obj := bucket.Object(path).ReadCompressed(acceptsGzip(r))
 	attr, err := obj.Attrs(ctx)
 
-	if err == storage.ErrObjectNotExist {
+	if err == storage.ErrObjectNotExist || (attr.Size == 0 && strings.HasSuffix(path, "/")) {
 		if *redirect404 {
 			// Remove first slash, otherwise it won't find an object. Add tailing slash if missing.
 			if !strings.HasSuffix(path, "/") {
@@ -317,10 +319,19 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 				}
 
 				name = strings.Replace(name, path, "", 1)
+				if !isDir && attrs.Size == 0 && name == "" { // empty hidden files for directories?
+					continue
+				}
+
+				link := name
+				if !strings.HasSuffix(params["object"], "/") {
+					link = params["object"] + "/" + link
+				}
+
 				items = append(items, TemplateItem{
 					IsDir: isDir,
 					Name:  name,
-					Link:  template.URL(name),
+					Link:  template.URL(link),
 					Size:  attrs.Size,
 					Attrs: attrs,
 				})
@@ -331,7 +342,7 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 				panic(err)
 			}
 
-			fmt.Printf("Found %d items @%s", len(items), path)
+			fmt.Printf("Found %d items @%s\n", len(items), path)
 			sort.Slice(items, func(i, j int) bool {
 				return strings.Compare(items[i].Name, items[j].Name) < 0
 			})
