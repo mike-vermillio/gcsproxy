@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -30,14 +34,126 @@ var (
 	bind          = flag.String("b", "127.0.0.1:8080", "Bind address.")
 	creds         = flag.String("c", "", "The path to the keyfile. If not present, client will use your default application credentials.")
 	redirect404   = flag.Bool("r", false, "Redirect to index.html if 404 not found.")
+	listDirectory = flag.Bool("list-directory", false, "Show directory listing if requested path is not found")
 	indexPage     = flag.String("i", "", "Index page file name.")
 	useDomainName = flag.Bool("dn", false, "Use hostname as a bucket name.")
 	forceBucket   = flag.String("force-bucket", "", "Force bucket name.")
+	prefix        = flag.String("prefix", "", "Use a prefix for all paths specified.")
 	useSecret     = flag.String("s", "", "Use SA key from secretManager. E.G. 'projects/937192795301/secrets/gcs-proxy/versions/1'")
 	verbose       = flag.Bool("v", false, "Show access log.")
 
 	enableOtel = flag.Bool("otel", false, "Enable opentelemetry.")
+
+	templateString = `<!DOCTYPE html>
+	<html lang="en">
+	<head>
+		<meta charset="UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<title>Directory Listing</title>
+		<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+	</head>
+	<body class="bg-gray-100 p-8">
+	
+		<div class="mx-auto">
+			<h1 class="text-2xl font-bold mb-4">Directory Listing: {{.Prefix}}</h1>
+	
+			<div class="overflow-x-auto">
+				<table class="min-w-full border bg-white">
+					<thead>
+						<tr>
+							<th class="py-2 px-4 border-b w-4/5">Name</th>
+							<th class="py-2 px-4 border-b w-1/5">Size</th>
+						</tr>
+					</thead>
+					<tbody>
+						{{if ne .Prefix ""}}
+						<tr>
+							<td class="py-2 px-4 border-b w-4/5">
+								<i class="fas fa-folder text-green-500"></i>
+								<a href=".." class="text-blue-500 font-semibold">..</a>
+							</td>
+							<td class="py-2 px-4 border-b w-1/5">--</td>
+						</tr>
+						{{end}}
+						{{range .Items}}
+							<tr>
+								<td class="py-2 px-4 border-b w-4/5">
+									{{if .IsDir}}
+										<i class="fas fa-folder text-green-500"></i>
+									{{else}}
+										<i class="fas fa-file text-gray-500"></i>
+									{{end}}
+									<a href="{{.Link}}" class="text-blue-500 font-semibold">{{.Name}}</a>
+								</td>
+								<td class="py-2 px-4 border-b w-1/5">
+									{{if .IsDir}}--{{else}}{{formatSize .Size}}{{end}}
+								</td>
+								</td>
+							</tr>
+						{{end}}
+					</tbody>
+				</table>
+			</div>
+		</div>
+	
+	</body>
+	</html>`
 )
+
+func formatSize(size int64) string {
+	const (
+		B = 1 << (10 * iota)
+		KB
+		MB
+		GB
+		TB
+		PB
+		EB
+	)
+
+	value := float64(size)
+	unit := ""
+
+	switch {
+	case size < KB:
+		unit = "B"
+	case size < MB:
+		value /= KB
+		unit = "KB"
+	case size < GB:
+		value /= MB
+		unit = "MB"
+	case size < TB:
+		value /= GB
+		unit = "GB"
+	case size < PB:
+		value /= TB
+		unit = "TB"
+	case size < EB:
+		value /= PB
+		unit = "PB"
+	default:
+		value /= EB
+		unit = "EB"
+	}
+
+	return strconv.FormatFloat(value, 'f', 2, 64) + " " + unit
+}
+
+type ItemType string
+
+type TemplateItem struct {
+	IsDir bool
+	Name  string
+	Link  template.URL
+	Size  int64
+	Attrs *storage.ObjectAttrs
+}
+type TemplateData struct {
+	Prefix string
+	Items  []TemplateItem
+}
 
 var (
 	client *storage.Client
@@ -130,27 +246,116 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 		params["bucket"] = *forceBucket
 	}
 
-	// Set index page name
-	if *indexPage != "" && params["object"] == "" {
-		params["object"] = *indexPage
+	path := ""
+	if *prefix != "" {
+		path = *prefix
+		if !strings.HasSuffix(path, "/") {
+			path += "/"
+		}
 	}
 
-	obj := client.Bucket(params["bucket"]).Object(params["object"]).ReadCompressed(acceptsGzip(r))
+	// Set index page name
+	if *indexPage != "" && params["object"] == "" {
+		path += *indexPage
+	} else {
+		path += params["object"]
+	}
+
+	bucket := client.Bucket(params["bucket"])
+
+	if path == "" && *listDirectory {
+		path = "/" // hacky but works for now...
+	}
+	obj := bucket.Object(path).ReadCompressed(acceptsGzip(r))
 	attr, err := obj.Attrs(ctx)
 
-	if err == storage.ErrObjectNotExist && *redirect404 {
-		// Remove first slash, otherwise it won't find an object. Add tailing slash if missing.
-		u := r.URL.RequestURI()[1:]
-		if l := len(u) - 1; u[l:] != "/" {
-			u = u + "/"
-		}
+	if err == storage.ErrObjectNotExist {
+		if *redirect404 {
+			// Remove first slash, otherwise it won't find an object. Add tailing slash if missing.
+			if !strings.HasSuffix(path, "/") {
+				path += "/"
+			}
 
-		obj = client.Bucket(params["bucket"]).Object(u + *indexPage)
-		attr, err = obj.Attrs(ctx)
-
-		if err == storage.ErrObjectNotExist {
-			obj = client.Bucket(params["bucket"]).Object(*indexPage)
+			obj = bucket.Object(path + *indexPage)
 			attr, err = obj.Attrs(ctx)
+
+			if err == storage.ErrObjectNotExist && path == "/" {
+				obj = bucket.Object(*indexPage)
+				attr, err = obj.Attrs(ctx)
+			}
+		} else if *listDirectory {
+			if strings.HasPrefix(path, "/") {
+				path = path[1:]
+			}
+
+			if path != "" && !strings.HasSuffix(path, "/") {
+				path += "/"
+			}
+
+			fmt.Printf("Listing directory %s\n", path)
+			it := bucket.Objects(ctx, &storage.Query{
+				Prefix:    path,
+				Delimiter: "/",
+			})
+
+			var items []TemplateItem
+			for {
+				attrs, err := it.Next()
+				if err == iterator.Done {
+					break
+				}
+				if err != nil {
+					fmt.Errorf("Bucket(%q).Objects(): %w", bucket, err)
+					break
+				}
+
+				name := attrs.Name
+				isDir := false
+				if attrs.Prefix != "" {
+					name = attrs.Prefix
+					isDir = true
+				}
+
+				name = strings.Replace(name, path, "", 1)
+				items = append(items, TemplateItem{
+					IsDir: isDir,
+					Name:  name,
+					Link:  template.URL(name),
+					Size:  attrs.Size,
+					Attrs: attrs,
+				})
+			}
+
+			tpl, err := template.New("directory").Funcs(template.FuncMap{"formatSize": formatSize}).Parse(templateString)
+			if err != nil {
+				panic(err)
+			}
+
+			fmt.Printf("Found %d items @%s", len(items), path)
+			sort.Slice(items, func(i, j int) bool {
+				return strings.Compare(items[i].Name, items[j].Name) < 0
+			})
+
+			pfx := path
+			if *prefix != "" {
+				pfx = strings.Replace(pfx, *prefix, "", 1)
+			}
+
+			if strings.HasPrefix(pfx, "/") {
+				pfx = pfx[1:]
+			}
+
+			tpl.Execute(w, TemplateData{
+				Prefix: pfx,
+				Items:  items,
+			})
+
+			setStrHeader(w, "Content-Type", "text/html; charset=utf-8")
+			setStrHeader(w, "Cache-Control", "max-age=3600, public")
+			setStrHeader(w, "X-Goog-Authenticated-User-Id", r.Header.Get("X-Goog-Authenticated-User-Id"))
+			setStrHeader(w, "X-Goog-Authenticated-User-Email", r.Header.Get("X-Goog-Authenticated-User-Email"))
+
+			return
 		}
 	}
 
@@ -237,8 +442,8 @@ func main() {
 
 	if *creds != "" {
 		client, err = storage.NewClient(ctx, option.WithCredentialsFile(*creds))
-	} else if *useSecret != "" {
-		client, err = storage.NewClient(ctx, option.WithCredentialsFile(GetSecret(*useSecret)))
+		// } else if *useSecret != "" {
+		// 	client, err = storage.NewClient(ctx, option.WithCredentialsFile(GetSecret(*useSecret)))
 	} else {
 		client, err = storage.NewClient(ctx)
 	}
