@@ -52,41 +52,86 @@ var (
 		<title>Directory Listing</title>
 		<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
 		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+		<style>
+			/* Additional styling for sorting indicators */
+			.sort-header {
+				cursor: pointer;
+			}
+
+			.sort-asc::after {
+				content: " ▲";
+				font-weight: bold;
+			}
+
+			.sort-desc::after {
+				content: " ▼";
+				font-weight: bold;
+			}
+		</style>
+
+		<!-- Include jQuery (required for Tablesorter) -->
+		<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+	
+		<!-- Include the Tablesorter library -->
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery.tablesorter/2.31.3/js/jquery.tablesorter.min.js"></script>
+		
+		<script>
+			$(document).ready(function () {
+				$(".tablesorter").tablesorter({
+					cssIconAsc: 'sort-asc',
+					cssIconDesc: 'sort-desc',
+					headerTemplate: '{content}{icon}'
+				});
+			});
+		</script>
 	</head>
 	<body class="bg-gray-100 p-8">
 	
-		<div class="mx-auto">
+		<div class="max-w-full mx-auto">
 			<h1 class="text-2xl font-bold mb-4">Directory Listing: {{.Prefix}}</h1>
 	
 			<div class="overflow-x-auto">
-				<table class="min-w-full border bg-white">
+				<table class="tablesorter min-w-full border bg-white">
 					<thead class="bg-gray-50">
 						<tr>
-							<th class="text-left py-2 px-4 border-b w-4/5">Name</th>
-							<th class="text-left py-2 px-4 border-b w-1/5">Size</th>
+							<th class="text-left py-2 px-4 border-b w-1/12 sort-header">Type</th>
+							<th class="text-left py-2 px-4 border-b w-6/12 sort-header">Name</th>
+							<th class="text-left py-2 px-4 border-b w-3/12 sort-header">Last Modified</th>
+							<th class="text-left py-2 px-4 border-b w-2/12 sort-header">Size</th>
 						</tr>
 					</thead>
 					<tbody>
 						{{if ne .Prefix ""}}
 						<tr>
-							<td class="py-2 px-4 border-b w-4/5">
+							<td class="py-2 px-4 border-b w-1/12">
 								<i class="fas fa-folder text-green-500"></i>
+								<span class="invisible">Dir</span>
+							</td>
+							<td class="py-2 px-4 border-b w-6/12">
 								<a href=".." class="text-blue-500 font-semibold">..</a>
 							</td>
-							<td class="py-2 px-4 border-b w-1/5">--</td>
+							<td class="py-2 px-4 border-b w-3/12">--</td>
+							<td class="py-2 px-4 border-b w-2/12">--</td>
 						</tr>
 						{{end}}
 						{{range .Items}}
 							<tr>
-								<td class="py-2 px-4 border-b w-4/5">
+								<td class="py-2 px-4 border-b w-1/12">
 									{{if .IsDir}}
 										<i class="fas fa-folder text-green-500"></i>
+										<span class="invisible">Dir</span>
 									{{else}}
 										<i class="fas fa-file text-gray-500"></i>
+										<span class="invisible">File</span>
 									{{end}}
+								</td>
+								<td class="py-2 px-4 border-b w-6/12">
 									<a href="{{.Link}}" class="text-blue-500 font-semibold">{{.Name}}</a>
 								</td>
-								<td class="py-2 px-4 border-b w-1/5">
+								<td class="py-2 px-4 border-b w-3/12">
+									{{if .IsDir}}--{{else}}{{.ModTime.Format "2006-01-02 15:04:05"}}{{end}}
+								</td>
+								<td class="py-2 px-4 border-b w-2/12">
 									{{if .IsDir}}--{{else}}{{formatSize .Size}}{{end}}
 								</td>
 								</td>
@@ -144,11 +189,12 @@ func formatSize(size int64) string {
 type ItemType string
 
 type TemplateItem struct {
-	IsDir bool
-	Name  string
-	Link  template.URL
-	Size  int64
-	Attrs *storage.ObjectAttrs
+	IsDir   bool
+	Name    string
+	Link    template.URL
+	Size    int64
+	ModTime time.Time
+	Attrs   *storage.ObjectAttrs
 }
 type TemplateData struct {
 	Prefix string
@@ -329,11 +375,12 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 				}
 
 				items = append(items, TemplateItem{
-					IsDir: isDir,
-					Name:  name,
-					Link:  template.URL(link),
-					Size:  attrs.Size,
-					Attrs: attrs,
+					IsDir:   isDir,
+					Name:    name,
+					Link:    template.URL(link),
+					Size:    attrs.Size,
+					ModTime: attrs.Updated,
+					Attrs:   attrs,
 				})
 			}
 
