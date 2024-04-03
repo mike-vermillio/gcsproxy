@@ -371,7 +371,7 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 
 				link := name
 				if !strings.HasSuffix(params["object"], "/") {
-					link = params["object"] + "/" + link
+					link = "/" + path + link
 				}
 
 				items = append(items, TemplateItem{
